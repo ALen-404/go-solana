@@ -2,117 +2,163 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"log"
+	"math"
+	"os"
+	"strconv"
+	"time"
 
 	"github.com/blocto/solana-go-sdk/client"
-	"github.com/blocto/solana-go-sdk/common"
-	"github.com/blocto/solana-go-sdk/types"
-	"github.com/mr-tron/base58"
+	"github.com/joho/godotenv"
+	"golang.org/x/time/rate"
 )
 
-// TransactionState 用于管理交易状态
-type TransactionState struct {
-	Status  string
-	Message string
+// 交易数据结构
+type TransactionData struct {
+	Date string  // 交易日期（区块链时间戳）
+	Type string  // 交易类型: Buy or Sell
+	GOAT float64 // GOAT 数量
+	SOL  float64 // SOL 数量
+	Txn  string  // 交易签名
 }
 
-// 更新状态
-func updateState(state *TransactionState, status, message string) {
-	state.Status = status
-	state.Message = message
-	fmt.Printf("状态: %s, 信息: %s\n", state.Status, state.Message)
+// 处理交易数据并写入 CSV 文件
+func writeTransactionToCSV(transactions []TransactionData) {
+	file, err := os.Create("transactions.csv")
+	if err != nil {
+		log.Fatalf("Unable to create file: %v", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	writer.Write([]string{"Date", "Type", "GOAT", "SOL", "Txn"})
+
+	for _, txn := range transactions {
+		record := []string{
+			txn.Date,
+			txn.Type,
+			strconv.FormatFloat(txn.GOAT, 'f', 6, 64),
+			strconv.FormatFloat(txn.SOL, 'f', 9, 64),
+			txn.Txn,
+		}
+		writer.Write(record)
+	}
 }
 
 func main() {
-	// 初始化状态管理
-	state := &TransactionState{}
-	updateState(state, "初始化", "开始执行 Solana 交易程序")
-
-	// 使用给定的私钥（Base58编码）恢复账户
-	privateKeyBase58 := "5onJgBRWhMaAqh1bfaY3nuQ3HXaCpkR9aSHZNGLoHX84Egej5jmV9T9JpCQeri6TVUBz5PSftSDMWMbBQCJH3rZ8"
-	privateKey, err := base58.Decode(privateKeyBase58)
+	// 加载 .env 文件
+	err := godotenv.Load()
 	if err != nil {
-		updateState(state, "错误", fmt.Sprintf("私钥解码失败: %v", err))
-		log.Fatalf("私钥解码失败: %v", err)
+		log.Fatalf("Error loading .env file: %v", err)
 	}
 
-	// 从私钥字节数组恢复账户
-	account, err := types.AccountFromBytes(privateKey)
+	rpcURL := os.Getenv("RPC_URL")
+	tokenMintAddress := os.Getenv("TOKEN_MINT_ADDRESS")
+	solMintAddress := os.Getenv("SOL_MINT_ADDRESS")
+	goatMintAddress := os.Getenv("GOAT_MINT_ADDRESS")
+	maxTransactionsStr := os.Getenv("MAX_TRANSACTIONS")
+
+	if rpcURL == "" || tokenMintAddress == "" || solMintAddress == "" || goatMintAddress == "" || maxTransactionsStr == "" {
+		log.Fatal("Missing required environment variables")
+	}
+
+	// 解析 MAX_TRANSACTIONS 环境变量
+	maxTransactions, err := strconv.Atoi(maxTransactionsStr)
+	if err != nil || maxTransactions <= 0 {
+		log.Fatalf("Invalid MAX_TRANSACTIONS value: %v", maxTransactionsStr)
+	}
+
+	c := client.NewClient(rpcURL)
+
+	signatures, err := c.GetSignaturesForAddress(context.TODO(), tokenMintAddress)
 	if err != nil {
-		updateState(state, "错误", fmt.Sprintf("从私钥字节数组恢复账户失败: %v", err))
-		log.Fatalf("从私钥字节数组恢复账户失败: %v", err)
+		log.Fatalf("Failed to fetch signatures: %v", err)
 	}
 
-	// 输出钱包地址和私钥（Base58编码）
-	fmt.Printf("钱包地址: %s\n", account.PublicKey.ToBase58())
-	fmt.Printf("钱包私钥（Base58编码）: %s\n", privateKeyBase58)
+	fmt.Printf("Found %d transactions for the token\n", len(signatures))
 
-	// 连接到 Solana 本地测试
-	client := client.NewClient("http://127.0.0.1:8899") 
-	accountAddress := account.PublicKey.ToBase58()     // 使用给定的公钥作为账户地址
+	limiter := rate.NewLimiter(rate.Every(1*time.Second), 5)
+	var transactions []TransactionData
 
-	// 获取账户余额
-	balance, err := client.GetBalance(context.Background(), accountAddress)
-	if err != nil {
-		updateState(state, "错误", fmt.Sprintf("获取余额失败: %v", err))
-		log.Fatalf("获取余额失败: %v", err)
+	// 仅处理限制条数的交易
+	for i := 0; i < len(signatures) && i < maxTransactions; i++ {
+		if err := limiter.Wait(context.TODO()); err != nil {
+			log.Printf("Rate limiter error: %v", err)
+			continue
+		}
+
+		sig := signatures[i]
+		tx, err := c.GetTransaction(context.TODO(), sig.Signature)
+		if err != nil {
+			log.Printf("Failed to fetch transaction for signature %s: %v", sig.Signature, err)
+			continue
+		}
+
+		var txnType string
+		var txnFound bool
+		var goatBalances []float64
+		var solBalances []float64
+
+		for _, preBalance := range tx.Meta.PreTokenBalances {
+			for _, postBalance := range tx.Meta.PostTokenBalances {
+				if preBalance.Mint == postBalance.Mint {
+					if postBalance.Mint == solMintAddress {
+						preSOL, _ := strconv.ParseFloat(preBalance.UITokenAmount.UIAmountString, 64)
+						postSOL, _ := strconv.ParseFloat(postBalance.UITokenAmount.UIAmountString, 64)
+
+						if postSOL > preSOL {
+							txnType = "Buy"
+							solBalances = append(solBalances, postSOL-preSOL)
+						} else if postSOL < preSOL {
+							txnType = "Sell"
+							solBalances = append(solBalances, preSOL-postSOL)
+						}
+					}
+
+					if postBalance.Mint == goatMintAddress {
+						preGOAT, _ := strconv.ParseFloat(preBalance.UITokenAmount.UIAmountString, 64)
+						postGOAT, _ := strconv.ParseFloat(postBalance.UITokenAmount.UIAmountString, 64)
+
+						goatBalances = append(goatBalances, postGOAT-preGOAT)
+					}
+				}
+			}
+		}
+
+		blockTime := time.Unix(*tx.BlockTime, 0).Format("2006-01-02 15:04:05")
+
+		if !txnFound {
+			lastSol := solBalances[len(solBalances)-1]
+			lastGoat := goatBalances[len(goatBalances)-1]
+
+			if lastGoat == 0 || lastSol == 0 {
+				continue
+			}
+
+			transactions = append(transactions, TransactionData{
+				Date: blockTime,
+				Type: txnType,
+				GOAT: roundTo6Decimal(lastGoat),
+				SOL:  roundTo9Decimal(lastSol),
+				Txn:  sig.Signature,
+			})
+			txnFound = true
+		}
 	}
-	fmt.Printf("账户余额：%d lamports\n", balance)
 
-	// 获取最近的区块哈希（用于构建交易）
-	recentBlockhashResponse, err := client.GetLatestBlockhash(context.Background())
-	if err != nil {
-		updateState(state, "错误", fmt.Sprintf("获取最近区块哈希失败: %v", err))
-		log.Fatalf("获取最近区块哈希失败: %v", err)
-	}
+	writeTransactionToCSV(transactions)
+	fmt.Println("CSV file created successfully!")
+}
 
-	// 合约的 ProgramID
-	programID := common.PublicKeyFromString("6ZSAnGBubdn1DgHfZ1q3Rigc7gmaN9kX69fLwzTvxH2f") // 替换为你的合约 Program ID
+func roundTo6Decimal(value float64) float64 {
+	return math.Abs(math.Trunc(value*1e6) / 1e6)
+	
+}
 
-	// 存款金额
-	amount := uint64(1000)
-	data := make([]byte, 8)
-	binary.LittleEndian.PutUint64(data, amount)
-
-	// 创建合约指令：调用合约进行存款
-	txInstruction := types.Instruction{
-		ProgramID: programID, // 合约地址
-		Accounts: []types.AccountMeta{
-			{
-				PubKey:     account.PublicKey,  // 发送账户的公钥
-				IsSigner:   true,               // 需要签名
-				IsWritable: true,               // 可写
-			},
-		},
-		Data: data, // 合约的输入数据（存款金额）
-	}
-
-	// 创建交易消息
-	message := types.NewMessage(types.NewMessageParam{
-		FeePayer:        account.PublicKey,             // 费用支付者
-		RecentBlockhash: recentBlockhashResponse.Blockhash, // 最新的区块哈希
-		Instructions: []types.Instruction{
-			txInstruction, // 使用与合约交互的指令
-		},
-	})
-
-	// 创建交易对象
-	tx, err := types.NewTransaction(types.NewTransactionParam{
-		Signers: []types.Account{account}, // 只需要一个签名者
-		Message: message,
-	})
-	if err != nil {
-		updateState(state, "错误", fmt.Sprintf("创建交易失败: %v", err))
-		log.Fatalf("创建交易失败: %v", err)
-	}
-
-	// 发送交易
-	txhash, err := client.SendTransaction(context.Background(), tx)
-	if err != nil {
-		updateState(state, "错误", fmt.Sprintf("发送交易失败: %v", err))
-		log.Fatalf("发送交易失败: %v", err)
-	}
-	updateState(state, "成功", fmt.Sprintf("交易成功，交易哈希: %s", txhash))
+func roundTo9Decimal(value float64) float64 {
+	return math.Abs(math.Trunc(value*1e9) / 1e9)
 }
