@@ -17,11 +17,12 @@ import (
 
 // 交易数据结构
 type TransactionData struct {
-	Date string  // 交易日期（区块链时间戳）
-	Type string  // 交易类型: Buy or Sell
-	GOAT float64 // GOAT 数量
-	SOL  float64 // SOL 数量
-	Txn  string  // 交易签名
+	Date       string  // 交易日期（区块链时间戳的格式化时间）
+	Timestamp  int64   // 交易日期的 Unix 时间戳
+	Type       string  // 交易类型: Buy or Sell
+	GOAT       float64 // GOAT 数量
+	SOL        float64 // SOL 数量
+	Txn        string  // 交易签名
 }
 
 // 处理交易数据并写入 CSV 文件
@@ -43,13 +44,15 @@ func writeTransactionsToCSV(transactions []TransactionData, appendMode bool) {
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
+	// 写入表头（仅在非追加模式时）
 	if !appendMode {
-		writer.Write([]string{"Date", "Type", "GOAT", "SOL", "Txn"})
+		writer.Write([]string{"Date", "Timestamp", "Type", "GOAT", "SOL", "Txn"})
 	}
 
 	for _, txn := range transactions {
 		record := []string{
 			txn.Date,
+			strconv.FormatInt(txn.Timestamp, 10), // 时间戳
 			txn.Type,
 			strconv.FormatFloat(txn.GOAT, 'f', 6, 64),
 			strconv.FormatFloat(txn.SOL, 'f', 9, 64),
@@ -166,13 +169,15 @@ func main() {
 
 			// 如果找到交易数据
 			if solChange != 0 || goatChange != 0 {
-				blockTime := time.Unix(*tx.BlockTime, 0).Format("2006-01-02 15:04:05")
+				blockTimeUnix := *tx.BlockTime
+				blockTime := time.Unix(blockTimeUnix, 0).Format("2006-01-02 15:04:05")
 				batchTransactions = append(batchTransactions, TransactionData{
-					Date: blockTime,
-					Type: txnType,
-					GOAT: roundTo6Decimal(goatChange),
-					SOL:  roundTo9Decimal(solChange),
-					Txn:  sig.Signature,
+					Date:      blockTime,
+					Timestamp: blockTimeUnix,
+					Type:      txnType,
+					GOAT:      roundTo6Decimal(goatChange),
+					SOL:       roundTo9Decimal(solChange),
+					Txn:       sig.Signature,
 				})
 				log.Printf("Transaction added: %+v", batchTransactions[len(batchTransactions)-1])
 			}

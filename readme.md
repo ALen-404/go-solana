@@ -1,80 +1,78 @@
-# Solana交易数据提取工具
+# Go-Solana
 
-该项目用于从Solana区块链提取指定Token（如GOAT和SOL）的交易数据，并将交易记录存储为CSV文件。用户可以设置要提取的最大交易数、RPC地址、Token的Mint地址等。
+基于 Go 的应用程序，用于从 Solana 区块链获取交易数据、处理数据并将其保存到 CSV 文件中。
 
-## 目录结构
+## 功能
+- 从 Solana 地址获取交易数据。
+- 处理交易以计算 SOL 和 GOAT 余额变化。
+- 将交易详情保存到 CSV 文件中。
+- 支持速率限制以避免过多请求 RPC。
+- 可通过环境变量进行配置。
 
+## 文件结构
 ```
 .
 ├── cmd
-│   └── main.go          // 主程序入口，处理交易提取和CSV写入
-├── go.mod               // Go模块管理文件
-├── go.sum               // Go模块依赖锁定文件
-├── readme.md            // 项目说明文件
-└── transactions.csv     // 保存提取到的交易数据
+│   └── main.go         # 主程序逻辑
+├── go.mod              # Go 模块定义
+├── go.sum              # Go 依赖文件
+├── readme.md           # 项目文档
+└── transactions.csv    # 输出的已处理交易数据文件
 ```
 
-## 环境变量配置
+## 安装
 
-程序依赖以下环境变量：
-
-- `RPC_URL`：Solana节点的RPC URL。
-- `TOKEN_MINT_ADDRESS`：目标Token的Mint地址。
-- `SOL_MINT_ADDRESS`：SOL的Mint地址。
-- `GOAT_MINT_ADDRESS`：GOAT的Mint地址。
-- `EXCHANGE_ROUTER`：交易所路由地址，用于筛选交易。
-- `MAX_TRANSACTIONS`：要提取的最大交易数量。
-
-`.env` 文件示例：
-
-```env
-RPC_URL=https://api.mainnet-beta.solana.com
-TOKEN_MINT_ADDRESS=YourTokenMintAddress
-SOL_MINT_ADDRESS=SolMintAddress
-GOAT_MINT_ADDRESS=GoatMintAddress
-EXCHANGE_ROUTER=YourExchangeRouter
-MAX_TRANSACTIONS=1000
-```
-
-## 安装与运行
-
-1. 安装Go环境：请确保您已安装Go 1.18或更高版本。
-2. 克隆项目：
-
+1. 克隆代码库：
    ```bash
    git clone https://github.com/ALen-404/go-solana.git
    cd go-solana
    ```
 
-3. 安装依赖：
-
+2. 安装依赖：
    ```bash
    go mod tidy
    ```
 
-4. 配置`.env`文件，确保填入正确的环境变量。
-5. 构建并运行程序：
-
-   ```bash
-   go run ./cmd/main.go
+3. 在项目根目录下创建一个 `.env` 文件，并配置以下环境变量：
+   ```env
+   RPC_URL=<你的-Solana-RPC-URL>
+   TOKEN_MINT_ADDRESS=<你的-Token-Mint-地址>
+   SOL_MINT_ADDRESS=<你的-SOL-Mint-地址>
+   GOAT_MINT_ADDRESS=<你的-GOAT-Mint-地址>
+   EXCHANGE_ROUTER=<你的-Exchange-Router-地址>
+   MAX_TRANSACTIONS=<最大交易数量>
    ```
 
-运行后，交易数据会以CSV格式保存到`transactions.csv`文件中。
+## 使用方法
 
-## 功能描述
+1. 运行程序：
+   ```bash
+   go run cmd/main.go
+   ```
 
-- **交易数据提取**：从Solana区块链中提取指定Token的交易数据，支持买入（Buy）和卖出（Sell）交易。
-- **CSV输出**：提取的数据会保存为CSV文件，包含以下字段：
-  - `Date`：交易日期（区块链时间戳）。
-  - `Type`：交易类型（Buy 或 Sell）。
-  - `GOAT`：GOAT数量变化。
-  - `SOL`：SOL数量变化。
-  - `Txn`：交易签名。
-- **批量处理**：支持分批查询交易签名，并自动处理速率限制。
+2. 程序将会：
+   - 获取指定 Token 地址的交易签名。
+   - 处理每笔交易以计算 SOL 和 GOAT 的余额变化。
+   - 将处理后的交易数据保存到 `transactions.csv` 文件中。
+
+## 交易数据格式
+处理后的交易数据将保存到 `transactions.csv` 文件中，具有以下列：
+
+| 日期                | 时间戳         | 类型  | GOAT       | SOL         | 交易签名    |
+|---------------------|----------------|-------|------------|-------------|------------|
+| 交易日期            | Unix 时间戳    | 买/卖 | GOAT 数量  | SOL 数量    | 交易签名    |
+
+## 核心功能
+- **`writeTransactionsToCSV`**: 将交易数据写入 CSV 文件。
+- **`roundTo6Decimal`**: 将浮点数保留到小数点后六位。
+- **`roundTo9Decimal`**: 将浮点数保留到小数点后九位。
+
+## 依赖
+- [solana-go-sdk](https://github.com/blocto/solana-go-sdk): 用于 Go 的 Solana SDK。
+- [godotenv](https://github.com/joho/godotenv): 从 `.env` 文件加载环境变量。
+- [rate](https://pkg.go.dev/golang.org/x/time/rate): 速率限制工具。
 
 ## 注意事项
-
-- `.env`文件必须正确配置，否则程序无法运行。
-- 程序会根据`MAX_TRANSACTIONS`的配置提取最多指定数量的交易数据。
-- `transactions.csv`文件会被程序更新，之前的内容会根据模式（追加或覆盖）被处理。
+- 确保你的 Solana RPC URL 是活动的，并且有足够的吞吐量来处理请求。
+- 程序会跳过带有错误或失败状态的交易。
 
