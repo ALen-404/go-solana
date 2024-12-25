@@ -25,17 +25,27 @@ type TransactionData struct {
 }
 
 // 处理交易数据并写入 CSV 文件
-func writeTransactionToCSV(transactions []TransactionData) {
-	file, err := os.Create("transactions.csv")
+func writeTransactionsToCSV(transactions []TransactionData, appendMode bool) {
+	var file *os.File
+	var err error
+
+	if appendMode {
+		file, err = os.OpenFile("transactions.csv", os.O_APPEND|os.O_WRONLY, os.ModeAppend)
+	} else {
+		file, err = os.Create("transactions.csv")
+	}
+
 	if err != nil {
-		log.Fatalf("Unable to create file: %v", err)
+		log.Fatalf("Unable to open file: %v", err)
 	}
 	defer file.Close()
 
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	writer.Write([]string{"Date", "Type", "GOAT", "SOL", "Txn"})
+	if !appendMode {
+		writer.Write([]string{"Date", "Type", "GOAT", "SOL", "Txn"})
+	}
 
 	for _, txn := range transactions {
 		record := []string{
@@ -60,9 +70,10 @@ func main() {
 	tokenMintAddress := os.Getenv("TOKEN_MINT_ADDRESS")
 	solMintAddress := os.Getenv("SOL_MINT_ADDRESS")
 	goatMintAddress := os.Getenv("GOAT_MINT_ADDRESS")
+	exchangeRouter := os.Getenv("EXCHANGE_ROUTER")
 	maxTransactionsStr := os.Getenv("MAX_TRANSACTIONS")
 
-	if rpcURL == "" || tokenMintAddress == "" || solMintAddress == "" || goatMintAddress == "" || maxTransactionsStr == "" {
+	if rpcURL == "" || tokenMintAddress == "" || solMintAddress == "" || goatMintAddress == "" || exchangeRouter == "" || maxTransactionsStr == "" {
 		log.Fatal("Missing required environment variables")
 	}
 
@@ -74,89 +85,118 @@ func main() {
 
 	c := client.NewClient(rpcURL)
 
-	signatures, err := c.GetSignaturesForAddress(context.TODO(), tokenMintAddress)
-	if err != nil {
-		log.Fatalf("Failed to fetch signatures: %v", err)
-	}
-
-	fmt.Printf("Found %d transactions for the token\n", len(signatures))
-
 	limiter := rate.NewLimiter(rate.Every(1*time.Second), 5)
 	var transactions []TransactionData
+	var lastSignature string
+	appendMode := false
 
-	// 仅处理限制条数的交易
-	for i := 0; i < len(signatures) && i < maxTransactions; i++ {
-		if err := limiter.Wait(context.TODO()); err != nil {
-			log.Printf("Rate limiter error: %v", err)
-			continue
+	for len(transactions) < maxTransactions {
+		// 分批查询交易签名
+		config := client.GetSignaturesForAddressConfig{
+			Limit:  1000,
+			Before: lastSignature,
 		}
 
-		sig := signatures[i]
-		tx, err := c.GetTransaction(context.TODO(), sig.Signature)
+		log.Printf("Fetching transactions... Last Signature: %s", lastSignature)
+
+		signatures, err := c.GetSignaturesForAddressWithConfig(context.Background(), tokenMintAddress, config)
 		if err != nil {
-			log.Printf("Failed to fetch transaction for signature %s: %v", sig.Signature, err)
-			continue
+			log.Fatalf("Failed to fetch signatures: %v", err)
 		}
 
-		var txnType string
-		var txnFound bool
-		var goatBalances []float64
-		var solBalances []float64
-
-		for _, preBalance := range tx.Meta.PreTokenBalances {
-			for _, postBalance := range tx.Meta.PostTokenBalances {
-				if preBalance.Mint == postBalance.Mint {
-					if postBalance.Mint == solMintAddress {
-						preSOL, _ := strconv.ParseFloat(preBalance.UITokenAmount.UIAmountString, 64)
-						postSOL, _ := strconv.ParseFloat(postBalance.UITokenAmount.UIAmountString, 64)
-
-						if postSOL > preSOL {
-							txnType = "Buy"
-							solBalances = append(solBalances, postSOL-preSOL)
-						} else if postSOL < preSOL {
-							txnType = "Sell"
-							solBalances = append(solBalances, preSOL-postSOL)
-						}
-					}
-
-					if postBalance.Mint == goatMintAddress {
-						preGOAT, _ := strconv.ParseFloat(preBalance.UITokenAmount.UIAmountString, 64)
-						postGOAT, _ := strconv.ParseFloat(postBalance.UITokenAmount.UIAmountString, 64)
-
-						goatBalances = append(goatBalances, postGOAT-preGOAT)
-					}
-				}
-			}
+		if len(signatures) == 0 {
+			log.Println("No more signatures available, stopping.")
+			break // 无更多数据，退出
 		}
 
-		blockTime := time.Unix(*tx.BlockTime, 0).Format("2006-01-02 15:04:05")
+		log.Printf("Fetched %d signatures", len(signatures))
+		batchTransactions := []TransactionData{}
 
-		if !txnFound {
-			lastSol := solBalances[len(solBalances)-1]
-			lastGoat := goatBalances[len(goatBalances)-1]
+		for _, sig := range signatures {
+			log.Printf("Processing transaction: %s", sig.Signature)
 
-			if lastGoat == 0 || lastSol == 0 {
+			if err := limiter.Wait(context.TODO()); err != nil {
+				log.Printf("Rate limiter error: %v", err)
 				continue
 			}
 
-			transactions = append(transactions, TransactionData{
-				Date: blockTime,
-				Type: txnType,
-				GOAT: roundTo6Decimal(lastGoat),
-				SOL:  roundTo9Decimal(lastSol),
-				Txn:  sig.Signature,
-			})
-			txnFound = true
+			tx, err := c.GetTransaction(context.TODO(), sig.Signature)
+			if err != nil {
+				log.Printf("Failed to fetch transaction for signature %s: %v", sig.Signature, err)
+				continue
+			}
+
+			// 检查交易是否成功
+			if tx.Meta.Err != nil {
+				log.Printf("Transaction %s failed with error: %v", sig.Signature, tx.Meta.Err)
+				continue
+			}
+
+			var txnType string
+			var goatChange, solChange float64
+
+			// 遍历 PreTokenBalances 和 PostTokenBalances
+			for _, preBalance := range tx.Meta.PreTokenBalances {
+				if preBalance.Owner == exchangeRouter {
+					for _, postBalance := range tx.Meta.PostTokenBalances {
+						if postBalance.Owner == exchangeRouter && preBalance.Mint == postBalance.Mint {
+							// 处理 SOL 余额变化
+							if postBalance.Mint == solMintAddress {
+								preSOL, _ := strconv.ParseFloat(preBalance.UITokenAmount.UIAmountString, 64)
+								postSOL, _ := strconv.ParseFloat(postBalance.UITokenAmount.UIAmountString, 64)
+								if postSOL > preSOL {
+									txnType = "Buy"
+									solChange = postSOL - preSOL
+								} else if postSOL < preSOL {
+									txnType = "Sell"
+									solChange = preSOL - postSOL
+								}
+							}
+
+							// 处理 GOAT 余额变化
+							if postBalance.Mint == goatMintAddress {
+								preGOAT, _ := strconv.ParseFloat(preBalance.UITokenAmount.UIAmountString, 64)
+								postGOAT, _ := strconv.ParseFloat(postBalance.UITokenAmount.UIAmountString, 64)
+								goatChange = postGOAT - preGOAT
+							}
+						}
+					}
+				}
+			}
+
+			// 如果找到交易数据
+			if solChange != 0 || goatChange != 0 {
+				blockTime := time.Unix(*tx.BlockTime, 0).Format("2006-01-02 15:04:05")
+				batchTransactions = append(batchTransactions, TransactionData{
+					Date: blockTime,
+					Type: txnType,
+					GOAT: roundTo6Decimal(goatChange),
+					SOL:  roundTo9Decimal(solChange),
+					Txn:  sig.Signature,
+				})
+				log.Printf("Transaction added: %+v", batchTransactions[len(batchTransactions)-1])
+			}
+
+			// 达到限制时退出循环
+			if len(transactions)+len(batchTransactions) >= maxTransactions {
+				break
+			}
 		}
+
+		// 将当前批次写入 CSV
+		writeTransactionsToCSV(batchTransactions, appendMode)
+		appendMode = true
+		transactions = append(transactions, batchTransactions...)
+
+		// 更新 lastSignature 为当前批次的最后一个签名
+		lastSignature = signatures[len(signatures)-1].Signature
 	}
 
-	writeTransactionToCSV(transactions)
 	fmt.Println("CSV file created successfully!")
 }
 
 func roundTo6Decimal(value float64) float64 {
 	return math.Abs(math.Trunc(value*1e6) / 1e6)
-	
 }
 
 func roundTo9Decimal(value float64) float64 {
