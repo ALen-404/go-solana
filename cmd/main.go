@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"time"
-	"sync/atomic"
 	"sync"
 	"github.com/blocto/solana-go-sdk/client"
 	"github.com/joho/godotenv"
@@ -161,13 +160,11 @@ func roundTo9Decimal(value float64) float64 {
 }
 
 func main() {
-	// 加载环境变量
 	err := loadEnv()
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
 
-	// 环境变量初始化
 	rpcURL := os.Getenv("RPC_URL")
 	tokenMintAddress := os.Getenv("TOKEN_MINT_ADDRESS")
 	solMintAddress := os.Getenv("SOL_MINT_ADDRESS")
@@ -184,39 +181,39 @@ func main() {
 		log.Fatalf("Invalid MAX_TRANSACTIONS value: %v", maxTransactionsStr)
 	}
 
-	// 初始化客户端和限速器
 	c, limiter := initializeClient(rpcURL)
 
-	var transactions []TransactionData
 	var lastSignature string
+    totalProcessed := 0
+
 	appendMode := false
-	results := make(chan TransactionData)
+	results := make(chan TransactionData, maxTransactions)
 	var wg sync.WaitGroup
 
-	// 使用原子标志控制停止
-	var stopFlag atomic.Bool
-	stopFlag.Store(false)
+	for  {
 
-	for len(transactions) < maxTransactions && !stopFlag.Load() {
-		log.Printf("Fetching transactions... Last Signature: %s", lastSignature)
+			log.Println("Fetching transactions...")
+		
+		// 请求交易签名
 		signatures, err := fetchSignatures(c, tokenMintAddress, lastSignature, 1000)
 		if err != nil {
 			log.Fatalf(err.Error())
 		}
 
+		// 如果没有更多签名了，则退出
 		if len(signatures) == 0 {
 			log.Println("No more signatures available, stopping.")
 			break
 		}
-		var processedCount int32
-		// 遍历签名，处理交易
-		for _, sig := range signatures {
-			// 如果达到了最大交易数，停止创建新 Goroutine
-			if atomic.LoadInt32(&processedCount) >= int32(maxTransactions) {
-				stopFlag.Store(true)
-				break
-			}
 
+		// 更新 lastSignature 为最新的签名，避免重复抓取
+		lastSignature = signatures[len(signatures)-1]
+
+		// 对每个签名创建 Goroutine 去处理
+		for _, sig := range signatures {
+			if totalProcessed >= maxTransactions {
+                break
+            }
 			wg.Add(1)
 			go func(signature string) {
 				defer wg.Done()
@@ -241,40 +238,32 @@ func main() {
 					log.Printf("Error processing transaction %s: %v", signature, err)
 					return
 				}
-
-				// 如果已达到最大数量，直接返回
-				if stopFlag.Load() {
-					return
-				}
-				atomic.AddInt32(&processedCount, 1)
+				// 向 channel 发送处理结果
 				results <- txnData
-				log.Printf("Processed count: %d/%d", atomic.LoadInt32(&processedCount), maxTransactions)
 			}(sig)
+		
 		}
 
-		// 等待所有 Goroutine 完成
-		go func() {
-			wg.Wait()
-			close(results)
-		}()
-
-		// 收集结果
+		// 等待所有 Goroutine 完成处理
+		wg.Wait()
+		
+		// 处理并写入 CSV 文件
+		var txnList []TransactionData
+		close(results)
 		for txn := range results {
-			transactions = append(transactions, txn)
-			if len(transactions) >= maxTransactions {
-				stopFlag.Store(true)
-				break
-			}
+			txnList = append(txnList, txn)
 		}
 
-		// 写入 CSV 文件
-		err = writeTransactionsToCSV(transactions, appendMode)
-		if err != nil {
-			log.Fatalf("Error writing to CSV: %v", err)
-		}
+		// 将处理过的交易写入 CSV
+		err = writeTransactionsToCSV(txnList, appendMode)
 		appendMode = true
-		lastSignature = signatures[len(signatures)-1]
+		if err != nil {
+			log.Fatalf("Error writing transactions to CSV: %v", err)
+		}
+
+		// 重置 channel 和处理列表以进行下一轮抓取
+		results = make(chan TransactionData, maxTransactions)
 	}
 
-	fmt.Println("CSV file created successfully!")
+	log.Println("Transaction fetching and processing completed.")
 }
