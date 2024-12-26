@@ -9,7 +9,8 @@ import (
 	"os"
 	"strconv"
 	"time"
-
+	"sync/atomic"
+	"sync"
 	"github.com/blocto/solana-go-sdk/client"
 	"github.com/joho/godotenv"
 	"golang.org/x/time/rate"
@@ -37,7 +38,7 @@ func loadEnv() error {
 // 初始化 Solana 客户端和请求速率限制器
 func initializeClient(rpcURL string) (*client.Client, *rate.Limiter) {
 	c := client.NewClient(rpcURL)
-	limiter := rate.NewLimiter(rate.Every(time.Second/30), 30)
+	limiter := rate.NewLimiter(rate.Every(time.Second/5), 5)
 	return c, limiter
 }
 
@@ -118,9 +119,9 @@ func writeTransactionsToCSV(transactions []TransactionData, appendMode bool) err
 	var err error
 
 	if appendMode {
-		file, err = os.OpenFile("transactions.csv", os.O_APPEND|os.O_WRONLY, os.ModeAppend)
+		file, err = os.OpenFile("new_transactions.csv", os.O_APPEND|os.O_WRONLY, os.ModeAppend)
 	} else {
-		file, err = os.Create("transactions.csv")
+		file, err = os.Create("new_transactions.csv")
 	}
 
 	if err != nil {
@@ -131,7 +132,6 @@ func writeTransactionsToCSV(transactions []TransactionData, appendMode bool) err
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	// 写入表头（仅在非追加模式时）
 	if !appendMode {
 		writer.Write([]string{"Date", "Timestamp", "Type", "GOAT", "SOL", "Txn"})
 	}
@@ -139,7 +139,7 @@ func writeTransactionsToCSV(transactions []TransactionData, appendMode bool) err
 	for _, txn := range transactions {
 		record := []string{
 			txn.Date,
-			strconv.FormatInt(txn.Timestamp, 10), // 时间戳
+			strconv.FormatInt(txn.Timestamp, 10),
 			txn.Type,
 			strconv.FormatFloat(txn.GOAT, 'f', 6, 64),
 			strconv.FormatFloat(txn.SOL, 'f', 9, 64),
@@ -161,13 +161,13 @@ func roundTo9Decimal(value float64) float64 {
 }
 
 func main() {
-	// 加载 .env 文件
+	// 加载环境变量
 	err := loadEnv()
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
 
-	// 读取配置
+	// 环境变量初始化
 	rpcURL := os.Getenv("RPC_URL")
 	tokenMintAddress := os.Getenv("TOKEN_MINT_ADDRESS")
 	solMintAddress := os.Getenv("SOL_MINT_ADDRESS")
@@ -179,21 +179,25 @@ func main() {
 		log.Fatal("Missing required environment variables")
 	}
 
-	// 解析 MAX_TRANSACTIONS 环境变量
 	maxTransactions, err := strconv.Atoi(maxTransactionsStr)
 	if err != nil || maxTransactions <= 0 {
 		log.Fatalf("Invalid MAX_TRANSACTIONS value: %v", maxTransactionsStr)
 	}
 
-	// 初始化客户端和速率限制器
+	// 初始化客户端和限速器
 	c, limiter := initializeClient(rpcURL)
 
 	var transactions []TransactionData
 	var lastSignature string
 	appendMode := false
+	results := make(chan TransactionData)
+	var wg sync.WaitGroup
 
-	for len(transactions) < maxTransactions {
-		// 分批查询交易签名
+	// 使用原子标志控制停止
+	var stopFlag atomic.Bool
+	stopFlag.Store(false)
+
+	for len(transactions) < maxTransactions && !stopFlag.Load() {
 		log.Printf("Fetching transactions... Last Signature: %s", lastSignature)
 		signatures, err := fetchSignatures(c, tokenMintAddress, lastSignature, 1000)
 		if err != nil {
@@ -202,58 +206,73 @@ func main() {
 
 		if len(signatures) == 0 {
 			log.Println("No more signatures available, stopping.")
-			break // 无更多数据，退出
+			break
+		}
+		var processedCount int32
+		// 遍历签名，处理交易
+		for _, sig := range signatures {
+			// 如果达到了最大交易数，停止创建新 Goroutine
+			if atomic.LoadInt32(&processedCount) >= int32(maxTransactions) {
+				stopFlag.Store(true)
+				break
+			}
+
+			wg.Add(1)
+			go func(signature string) {
+				defer wg.Done()
+				if err := limiter.Wait(context.TODO()); err != nil {
+					log.Printf("Rate limiter error: %v", err)
+					return
+				}
+
+				tx, err := c.GetTransaction(context.TODO(), signature)
+				if err != nil {
+					log.Printf("Failed to fetch transaction for signature %s: %v", signature, err)
+					return
+				}
+
+				if tx.Meta.Err != nil {
+					log.Printf("Transaction %s failed: %v", signature, tx.Meta.Err)
+					return
+				}
+
+				txnData, err := processTransaction(tx, signature, solMintAddress, goatMintAddress, exchangeRouter)
+				if err != nil {
+					log.Printf("Error processing transaction %s: %v", signature, err)
+					return
+				}
+
+				// 如果已达到最大数量，直接返回
+				if stopFlag.Load() {
+					return
+				}
+				atomic.AddInt32(&processedCount, 1)
+				results <- txnData
+				log.Printf("Processed count: %d/%d", atomic.LoadInt32(&processedCount), maxTransactions)
+			}(sig)
 		}
 
-		log.Printf("Fetched %d signatures", len(signatures))
-		batchTransactions := []TransactionData{}
+		// 等待所有 Goroutine 完成
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
 
-		for _, sig := range signatures {
-			log.Printf("Processing transaction: %s", sig)
-
-			if err := limiter.Wait(context.TODO()); err != nil {
-				log.Printf("Rate limiter error: %v", err)
-				continue
-			}
-
-			tx, err := c.GetTransaction(context.TODO(), sig)
-			if err != nil {
-				log.Printf("Failed to fetch transaction for signature %s: %v", sig, err)
-				continue
-			}
-
-			// 检查交易是否成功
-			if tx.Meta.Err != nil {
-				log.Printf("Transaction %s failed with error: %v", sig, tx.Meta.Err)
-				continue
-			}
-
-			// 处理交易
-			txnData, err := processTransaction(tx, sig, solMintAddress, goatMintAddress, exchangeRouter)
-			if err != nil {
-				log.Printf("Error processing transaction %s: %v", sig, err)
-				continue
-			}
-
-			// 将交易数据添加到批次中
-			batchTransactions = append(batchTransactions, txnData)
-
-			// 达到限制时退出循环
-			if len(transactions)+len(batchTransactions) >= maxTransactions {
+		// 收集结果
+		for txn := range results {
+			transactions = append(transactions, txn)
+			if len(transactions) >= maxTransactions {
+				stopFlag.Store(true)
 				break
 			}
 		}
 
-		// 将当前批次写入 CSV
-		err = writeTransactionsToCSV(batchTransactions, appendMode)
+		// 写入 CSV 文件
+		err = writeTransactionsToCSV(transactions, appendMode)
 		if err != nil {
 			log.Fatalf("Error writing to CSV: %v", err)
 		}
-
 		appendMode = true
-		transactions = append(transactions, batchTransactions...)
-
-		// 更新 lastSignature 为当前批次的最后一个签名
 		lastSignature = signatures[len(signatures)-1]
 	}
 
