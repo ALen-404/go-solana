@@ -1,0 +1,56 @@
+{
+    "inputMint": "So11111111111111111111111111111111111111112",
+    "inAmount": "500000000",
+    "outputMint": "CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump",
+    "outAmount": "174052548",
+    "otherAmountThreshold": "172312023",
+    "swapMode": "ExactIn",
+    "slippageBps": 100,
+    "platformFee": null,
+    "priceImpactPct": "0",
+    "routePlan": [
+      {
+        "swapInfo": {
+          "ammKey": "3nMFwZXwY1s1M5s8vYAHqd4wGs4iSxXE4LRoUMMYqEgF",
+          "label": "Raydium CLMM",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "inAmount": "500000000",
+          "outAmount": "102455694",
+          "feeAmount": "42000",
+          "feeMint": "So11111111111111111111111111111111111111112"
+        },
+        "percent": 100
+      },
+      {
+        "swapInfo": {
+          "ammKey": "2mryJ9x72GtWTFWJeMT96x4Haj5SqdWpqKkwGA5CjpJe",
+          "label": "Stabble Stable Swap",
+          "inputMint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "inAmount": "102455694",
+          "outAmount": "102284075",
+          "feeAmount": "1380",
+          "feeMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        },
+        "percent": 100
+      },
+      {
+        "swapInfo": {
+          "ammKey": "HqmR2e611MRZeEr3DctgCvDDmzfbe789C9eL6oXitXmT",
+          "label": "SolFi",
+          "inputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "outputMint": "CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump",
+          "inAmount": "102284075",
+          "outAmount": "174052548",
+          "feeAmount": "0",
+          "feeMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        },
+        "percent": 100
+      }
+    ],
+    "scoreReport": null,
+    "contextSlot": 311349406,
+    "timeTaken": 0.047172295
+  }
+  

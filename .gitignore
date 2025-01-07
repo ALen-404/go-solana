@@ -1,0 +1,35 @@
+# Go binary files and build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Solana test ledger
+test-ledger/
+
+# Go installation package
+go1.22.1.linux-amd64.tar.gz
+
+# Generated files
+wallet_pubkey.txt
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+
+# OS generated files
+.DS_Store
+
+# Log files
+*.log
